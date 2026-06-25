@@ -1,23 +1,23 @@
 #!/bin/bash
-# Convenience wrapper for Visit Kili
-# Recommended daily:
-#   ./run.sh --submit --inspect --resume --history-backend sqlite
+# Generic convenience wrapper for any site
 #
-# With MySQL fallback:
+# Usage (edit the values below or override with arguments):
+#   ./run.sh --submit --inspect --resume --limit 150
+#
+# MySQL history backend example:
 #   ./run.sh --submit --inspect --resume --history-backend mysql \
-#            --mysql-database visitkili_indexer --mysql-user indexer
+#            --mysql-database my_indexer --mysql-user myuser
 #
-# Status:
+# Other useful commands:
 #   ./run.sh --status
-#
-# Export failed:
 #   ./run.sh --export-failed failed.txt
+#   ./run.sh --retry-errors --submit
 
 cd "$(dirname "$0")"
 
 python3 seo_indexer.py \
-  --site https://visitkili.com \
-  --sitemap https://visitkili.com/sitemap.xml \
+  --site https://example.com \
+  --sitemap https://example.com/sitemap.xml \
   --service-account service_account.json \
   --history-backend sqlite \
   "$@"

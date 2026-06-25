@@ -2,30 +2,38 @@
 """
 Generic SEO Page Indexer Tool
 
-Based on the proven algorithms from:
-- xenohuru request_indexing.py (JWT via openssl, sitemap parsing, resume/retry, quota handling)
-- Visit Kili / Xenohuru Google workplaces variants
+A reusable, standalone CLI tool for manually submitting URLs to the Google Indexing API
+and performing Search Console URL Inspections.
+
+Built on proven lightweight algorithms:
+- JWT authentication using openssl (no heavy Google client libraries)
+- Recursive sitemap.xml parsing (supports sitemap index files)
+- Robust resume / retry with persistent history backends (sqlite, json, mysql)
+- Quota awareness and polite rate limiting
+
+Designed to be 100% generic — works with any website that has a sitemap.
 
 Features:
-- Fetches and parses sitemap.xml
-- Submits pages one-by-one to Google Indexing API
-- Can perform URL Inspection via Search Console API
-- Progress saved to JSON (resume + retry failed)
-- Generic: configure via CLI or environment
-- Supports --sitemap, single --url, batch processing
-- Rate limit / quota aware
-- Simple, fast, no heavy dependencies beyond requests
+- Submit pages one-by-one via Google Indexing API
+- URL Inspection via Search Console (coverage, last crawl, indexing state, etc.)
+- Multiple history backends for reliable resume across runs
+- --resume, --retry-errors, --status, --export-failed, --dry-run
+- Fully configurable via CLI flags or environment
+- Minimal dependencies (requests + openssl)
 
-Usage examples:
-    python seo_indexer.py --site https://visitkili.com --sitemap https://visitkili.com/sitemap.xml --submit
-    python seo_indexer.py --site https://visitkili.com --url /tours/lemosho-8-days --submit --inspect
-    python seo_indexer.py --site https://visitkili.com --resume --submit
-    python seo_indexer.py --site https://visitkili.com --retry-failed --submit
-    python seo_indexer.py --site https://visitkili.com --inspect-only --limit 20
+Usage examples (generic):
+    python seo_indexer.py --site https://example.com --sitemap https://example.com/sitemap.xml --submit
+    python seo_indexer.py --site https://example.com --url /blog/post-123 --submit --inspect
+    python seo_indexer.py --resume --submit --inspect --limit 200
+    python seo_indexer.py --status
+    python seo_indexer.py --history-backend mysql --submit --inspect
 
 Requirements:
     pip install requests
-    (openssl must be available in PATH for JWT signing - matches original algorithm)
+    # Optional for MySQL history backend:
+    # pip install pymysql
+
+    openssl must be available in PATH for JWT signing.
 """
 
 import argparse
@@ -57,8 +65,9 @@ except ImportError:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (override with CLI or env)
+# These are generic placeholders. Override with --site / --sitemap or env.
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_SITE = "https://visitkili.com"
+DEFAULT_SITE = "https://example.com"
 DEFAULT_SITEMAP = f"{DEFAULT_SITE}/sitemap.xml"
 DEFAULT_RESULTS = "seo_indexing_results.json"
 DEFAULT_SERVICE_ACCOUNT = "service_account.json"

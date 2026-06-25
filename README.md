@@ -1,103 +1,141 @@
-# SEO Page Indexer (Generic)
+# SEO Page Indexer
 
-**External, high-control tool for manual Google Indexing API + Search Console inspection.**
+A lightweight, reusable CLI tool for manually controlling Google Indexing API submissions and Search Console URL inspections.
 
-Lives outside the web app to avoid any performance impact on shared hosting. Built from proven xenohuru algorithms (JWT via openssl, sitemap recursion, resume/retry logic).
+**Perfect for**:
+- Static sites, blogs, or any site with a sitemap
+- Shared hosting environments (run indexing from your laptop)
+- Teams that want fine-grained control and reliable resume across days/quotas
+- Open source portfolio projects
+
+Built with proven lightweight techniques (openssl JWT, no heavy Google SDKs).
 
 ## Features
 
-- Recursive sitemap.xml + sitemap index parsing (or local file)
-- Submit pages **one-by-one** to Google Indexing API (`URL_UPDATED`)
-- URL Inspection via Search Console (coverageState, lastCrawlTime, indexingState, etc.)
-- Strong resume / retry support
-- **Multiple history backends** (critical for "proceed where it ended"):
-  - `sqlite` (default, zero extra deps, robust)
-  - `json` (simple, backward compatible)
-  - `mysql` (team / production fallback)
-- Daily quota tracking + auto-stop
-- `--status`, `--export-failed`, `--retry-errors`
-- 100% generic + lightweight (openssl + requests)
+- Recursive parsing of `sitemap.xml` (including sitemap index files)
+- One-by-one submissions to the Google Indexing API
+- Full URL Inspection via Search Console API
+- **Multiple persistent history backends** for bulletproof resume:
+  - `sqlite` (default – zero extra dependencies)
+  - `json` (simple files)
+  - `mysql` (for shared databases or teams)
+- Daily quota awareness with auto-stop
+- Useful commands: `--status`, `--export-failed`, `--retry-errors`, `--dry-run`
+- Fully generic and configurable
 
-## Quick Start (Visit Kili example)
+## Quick Start
 
 ```bash
-cd /home/cleven/Private/visitkili-github/seo_page_indexer
+# Install
+pip install requests
 
-# Put service_account.json here (or use --service-account)
+# Basic usage (replace with your site)
+python seo_indexer.py \
+  --site https://example.com \
+  --sitemap https://example.com/sitemap.xml \
+  --service-account service_account.json \
+  --submit --inspect --resume
+```
 
-# Full run: index via sitemap + inspect all pages
-python seo_indexer.py --submit --inspect
+### Common Commands
 
-# Safe resume after interruption or daily quota
-python seo_indexer.py --resume --submit --inspect
+```bash
+# Full submit + inspect with resume
+python seo_indexer.py --submit --inspect --resume --limit 150
 
-# Only run URL inspections (Search Console)
-python seo_indexer.py --inspect-only --limit 50
+# Check current progress
+python seo_indexer.py --status
 
-# Fix previous failures
+# Retry only failures
 python seo_indexer.py --retry-errors --submit
+
+# Export problematic URLs
+python seo_indexer.py --export-failed failed.txt
+
+# Use MySQL for history (robust fallback)
+python seo_indexer.py --history-backend mysql --submit --inspect --resume
 ```
 
 ## Configuration
 
-All via CLI flags (no hard-coded values):
+All behavior is controlled via command line (recommended) or environment variables.
 
-- `--site`         → Base site URL
-- `--sitemap`      → Full sitemap URL (defaults to `{site}/sitemap.xml`)
-- `--service-account` → Path to service account JSON
-- `--results`      → Progress file (default: `seo_indexing_results.json`)
-- `--url`          → Single URL
-- `--limit`        → Max URLs this run
+Key options:
+- `--site` — Your website base URL
+- `--sitemap` — Sitemap location (defaults to `{site}/sitemap.xml`)
+- `--history-backend` — `sqlite` | `json` | `mysql`
+- `--limit` — Safety limit per run (important for quotas)
+
+See `.env.example` for environment variable usage.
 
 ## Requirements
 
+- Python 3
+- `requests`
+- `openssl` in your PATH (for JWT signing — the lightweight method)
+- Optional: `pymysql` (only if using `--history-backend mysql`)
+
+## Google Setup (one time)
+
+1. Create a Service Account in Google Cloud Console
+2. Enable the **Indexing API**
+3. Download the JSON key file
+4. In Google Search Console, add the service account email as an **Owner** (or at least full access) for the property
+
+## History Backends
+
+The tool is designed so you can safely stop and resume days later.
+
+**sqlite** (recommended default)
 ```bash
-pip install requests
+python seo_indexer.py --history-backend sqlite --resume --submit --inspect
 ```
 
-`openssl` must be available (used for JWT signing — same method as the xenohuru scripts).
-
-## Service Account Setup
-
-1. Create service account in Google Cloud
-2. Enable **Web Search Indexing API**
-3. Download JSON key
-4. Add the service account email as **Owner** in Search Console for the property
-
-## Output
-
-Progress is saved after every URL:
-
-```json
-{
-  "submitted": [...],
-  "inspected": [...],
-  "errors": [...],
-  "quota_exceeded": [...]
-}
-```
-
-## History Backends (MySQL Fallback)
-
-The tool supports persistent history so you can always "just proceed where it ended".
-
+**mysql** (great for teams or when you want a real database)
 ```bash
-# Best default (sqlite file)
-python seo_indexer.py --submit --inspect --resume --history-backend sqlite
-
-# MySQL (for teams or when you want DB history)
-python seo_indexer.py --submit --inspect --resume \
+python seo_indexer.py \
   --history-backend mysql \
-  --mysql-database indexer \
-  --mysql-user indexer_user \
-  --mysql-password secret
+  --mysql-database seo_indexer \
+  --mysql-user youruser \
+  --resume --submit
 ```
 
-Table created automatically: `indexer_jobs` (url, status, submitted_at, inspected_at, attempts, last_error...).
+The tool will automatically create the necessary tables (`indexer_jobs` and quota tracking).
 
-## Typical Visit Kili Flow (after content import)
+## Example: Using with Any Site (Django, Static, etc.)
 
-1. Use the Django CLI:
+After adding new content and regenerating your sitemap:
+
+```bash
+python seo_indexer.py \
+  --site https://yourdomain.com \
+  --submit --inspect --resume --limit 100
+```
+
+This works for Django sites, static generators, WordPress, etc. — anything with a public sitemap.
+
+## Why This Project?
+
+- Many people rely on auto-indexing signals that are slow or unreliable.
+- This gives you **direct control** with excellent observability and resume.
+- Runs anywhere (your laptop, CI, small server) — ideal when you don't want indexing logic inside your web app.
+- Clean, MIT-licensed, and designed to be reusable for any public website.
+
+## License
+
+MIT — see [LICENSE](LICENSE) file.
+
+Contributions and improvements are welcome!
+
+## Portfolio Note
+
+This tool was created as a practical, production-grade open source utility. It demonstrates:
+- Clean architecture with pluggable backends
+- Careful handling of external APIs and quotas
+- Good CLI UX and documentation
+- Real-world usefulness for SEO automation
+
+Feel free to link to it in your portfolio.
    ```bash
    python manage.py import_json_content --dir /path/to/json-batches/ --progress
    ```
