@@ -32,9 +32,9 @@ jobs:
 
       - name: Verify CLI
         run: |
-          google-indexer-cli --version
-          google-indexer-cli --help
-          google-indexer-cli --status || true
+          google-indexer --version
+          google-indexer --help
+          google-indexer --status || true
 
       - name: Run basic smoke test
         run: |

@@ -22,13 +22,14 @@ Features:
 - Minimal dependencies (requests + openssl)
 
 Usage examples (generic):
-    # After `pip install git+https://github.com/cleven12/google-indexer-cli.git`
-    google-indexer-cli --site https://example.com --sitemap https://example.com/sitemap.xml --submit
+    # After install
+    google-indexer --site https://example.com --sitemap https://example.com/sitemap.xml --submit
+    # (alias also works: google-indexer-cli)
 
-    google-indexer-cli --site https://example.com --url /blog/post-123 --submit --inspect
-    google-indexer-cli --resume --submit --inspect --limit 200
-    google-indexer-cli --status
-    google-indexer-cli --history-backend mysql --submit --inspect
+    google-indexer --site https://example.com --url /blog/post-123 --submit --inspect
+    google-indexer --resume --submit --inspect --limit 200
+    google-indexer --status
+    google-indexer --history-backend mysql --submit --inspect
 
     # Or run directly from source:
     python seo_indexer.py --site https://example.com ...

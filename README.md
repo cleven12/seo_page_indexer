@@ -39,10 +39,12 @@ cd google-indexer-cli
 pip install .
 ```
 
+After install, both `google-indexer` and `google-indexer-cli` commands are available.
+
 ### Basic Usage
 
 ```bash
-google-indexer-cli \
+google-indexer \
   --site https://example.com \
   --submit --inspect --resume
 ```
@@ -53,20 +55,20 @@ google-indexer-cli \
 ```bash
 # With pipx (recommended for CLI tools)
 pipx install git+https://github.com/cleven12/google-indexer-cli.git
-google-indexer-cli --status
+google-indexer --status
 ```
 
 **Windows (PowerShell)**
 ```powershell
 pip install git+https://github.com/cleven12/google-indexer-cli.git
-google-indexer-cli --submit --inspect --resume
+google-indexer --submit --inspect --resume
 ```
 
 **Docker**
 ```bash
 docker run --rm -v $(pwd):/work -w /work python:3.11 \
   sh -c "pip install git+https://github.com/cleven12/google-indexer-cli.git && \
-         google-indexer-cli --site https://example.com --submit --inspect"
+         google-indexer --site https://example.com --submit --inspect"
 ```
 
 **GitHub Actions** (example for static sites)
@@ -74,7 +76,7 @@ docker run --rm -v $(pwd):/work -w /work python:3.11 \
 - name: Index new pages
   run: |
     pip install git+https://github.com/cleven12/google-indexer-cli.git
-    google-indexer-cli --site https://example.com --submit --inspect --resume --limit 50
+    google-indexer --site https://example.com --submit --inspect --resume --limit 50
 ```
 
 ### Using with AI Tools (Claude / Google APIs)
@@ -89,7 +91,7 @@ Example flow:
 # 1. Generate content with Claude / Gemini (your own script)
 # 2. Rebuild sitemap
 # 3. Index immediately
-google-indexer-cli --site https://example.com --submit --inspect --resume
+google-indexer --site https://example.com --submit --inspect --resume
 ```
 
 This combination (AI content generation + direct Google Indexing) helps get fresh content indexed quickly.
@@ -97,11 +99,11 @@ This combination (AI content generation + direct Google Indexing) helps get fres
 ### Common Commands
 
 ```bash
-google-indexer-cli --submit --inspect --resume --limit 150
-google-indexer-cli --status
-google-indexer-cli --retry-errors --submit
-google-indexer-cli --export-failed failed.txt
-google-indexer-cli --history-backend mysql --submit --inspect --resume
+google-indexer --submit --inspect --resume --limit 150
+google-indexer --status
+google-indexer --retry-errors --submit
+google-indexer --export-failed failed.txt
+google-indexer --history-backend mysql --submit --inspect --resume
 ```
 
 ## Configuration
