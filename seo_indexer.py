@@ -32,11 +32,13 @@ import argparse
 import base64
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, date
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -45,6 +47,13 @@ try:
 except ImportError:
     print("ERROR: pip install requests")
     sys.exit(1)
+
+# Optional MySQL
+try:
+    import pymysql
+    HAS_PYMYSQL = True
+except ImportError:
+    HAS_PYMYSQL = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (override with CLI or env)
@@ -63,6 +72,10 @@ DAILY_QUOTA = 180
 DELAY_SECONDS = 0.25
 MAX_RETRIES = 3
 RETRY_BACKOFF = [5, 15, 40]
+
+# History backends
+DEFAULT_HISTORY_BACKEND = "sqlite"
+DEFAULT_DB_PATH = "indexer_history.db"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,8 +255,274 @@ def inspect_url(url: str, token: str, site_url: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Progress management (same pattern as xenohuru)
+# Advanced State Management (JSON / SQLite / MySQL fallback)
+# Supports "proceed where it ended" with persistent history as requested
 # ─────────────────────────────────────────────────────────────────────────────
+class IndexerState:
+    """
+    Unified state for submitted/inspected jobs.
+    Backends:
+      - json: simple file (backward compat)
+      - sqlite: recommended, file-based, queryable, no extra deps
+      - mysql: for shared team / robust fallback (requires pymysql)
+    """
+
+    def __init__(self, backend: str = "sqlite", path: str = None, mysql_config: dict = None):
+        self.backend = backend.lower()
+        self.path = Path(path) if path else Path(DEFAULT_DB_PATH)
+        self.mysql_config = mysql_config or {}
+        self.conn = None
+        self._init_backend()
+
+    def _init_backend(self):
+        if self.backend == "json":
+            self._data = self._load_json()
+        elif self.backend == "sqlite":
+            self._init_sqlite()
+        elif self.backend == "mysql":
+            if not HAS_PYMYSQL:
+                print("ERROR: pip install pymysql for mysql backend")
+                sys.exit(1)
+            self._init_mysql()
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
+
+    def _load_json(self):
+        if self.path.exists():
+            try:
+                return json.loads(self.path.read_text())
+            except Exception:
+                pass
+        return {"submitted": [], "inspected": [], "errors": [], "quota_exceeded": [], "daily": {}}
+
+    def _init_sqlite(self):
+        self.conn = sqlite3.connect(str(self.path))
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                url TEXT PRIMARY KEY,
+                status TEXT,           -- pending, submitted, inspected, error, quota
+                submitted_at TEXT,
+                inspected_at TEXT,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                updated_at TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS quota (
+                day TEXT PRIMARY KEY,
+                count INTEGER DEFAULT 0
+            )
+        """)
+        self.conn.commit()
+
+    def _init_mysql(self):
+        cfg = self.mysql_config
+        self.conn = pymysql.connect(
+            host=cfg.get('host', 'localhost'),
+            port=int(cfg.get('port', 3306)),
+            user=cfg.get('user', 'root'),
+            password=cfg.get('password', ''),
+            database=cfg.get('database', 'indexer'),
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor
+        )
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS indexer_jobs (
+                    url VARCHAR(512) PRIMARY KEY,
+                    status VARCHAR(32),
+                    submitted_at DATETIME,
+                    inspected_at DATETIME,
+                    attempts INT DEFAULT 0,
+                    last_error TEXT,
+                    updated_at DATETIME
+                ) ENGINE=InnoDB
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS indexer_quota (
+                    day DATE PRIMARY KEY,
+                    count INT DEFAULT 0
+                ) ENGINE=InnoDB
+            """)
+        self.conn.commit()
+
+    def mark_submitted(self, url: str):
+        now = datetime.utcnow().isoformat()
+        if self.backend == "json":
+            if url not in self._data["submitted"]:
+                self._data["submitted"].append(url)
+            self._save_json()
+        elif self.backend == "sqlite":
+            self.conn.execute(
+                "INSERT OR REPLACE INTO jobs (url, status, submitted_at, attempts, updated_at) "
+                "VALUES (?, 'submitted', ?, COALESCE((SELECT attempts FROM jobs WHERE url=?),0)+1, ?)",
+                (url, now, url, now)
+            )
+            self.conn.commit()
+        else:  # mysql
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO indexer_jobs (url, status, submitted_at, attempts, updated_at) "
+                    "VALUES (%s, 'submitted', %s, 1, %s) "
+                    "ON DUPLICATE KEY UPDATE status='submitted', submitted_at=VALUES(submitted_at), "
+                    "attempts=attempts+1, updated_at=VALUES(updated_at)",
+                    (url, now, now)
+                )
+            self.conn.commit()
+
+    def mark_inspected(self, url: str):
+        now = datetime.utcnow().isoformat()
+        if self.backend == "json":
+            if url not in self._data["inspected"]:
+                self._data["inspected"].append(url)
+            self._save_json()
+        elif self.backend == "sqlite":
+            self.conn.execute(
+                "UPDATE jobs SET status='inspected', inspected_at=?, updated_at=? WHERE url=?",
+                (now, now, url)
+            )
+            self.conn.commit()
+        else:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE indexer_jobs SET status='inspected', inspected_at=%s, updated_at=%s WHERE url=%s",
+                    (now, now, url)
+                )
+            self.conn.commit()
+
+    def mark_error(self, url: str, error: str, is_quota: bool = False):
+        now = datetime.utcnow().isoformat()
+        status = "quota" if is_quota else "error"
+        if self.backend == "json":
+            key = "quota_exceeded" if is_quota else "errors"
+            if url not in self._data[key]:
+                self._data[key].append(url)
+            self._save_json()
+        elif self.backend == "sqlite":
+            self.conn.execute(
+                "INSERT OR REPLACE INTO jobs (url, status, attempts, last_error, updated_at) "
+                "VALUES (?, ?, COALESCE((SELECT attempts FROM jobs WHERE url=?),0)+1, ?, ?)",
+                (url, status, url, error[:500], now)
+            )
+            self.conn.commit()
+        else:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO indexer_jobs (url, status, attempts, last_error, updated_at) "
+                    "VALUES (%s,%s,1,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "status=%s, attempts=attempts+1, last_error=%s, updated_at=%s",
+                    (url, status, error[:500], now, status, error[:500], now)
+                )
+            self.conn.commit()
+
+    def get_pending(self, all_urls: list[str], resume: bool) -> list[str]:
+        if not resume:
+            return all_urls
+        done = set(self.get_submitted() + self.get_inspected())
+        return [u for u in all_urls if u not in done]
+
+    def get_submitted(self) -> list[str]:
+        if self.backend == "json":
+            return self._data.get("submitted", [])
+        if self.backend == "sqlite":
+            cur = self.conn.execute("SELECT url FROM jobs WHERE status IN ('submitted','inspected')")
+            return [r[0] for r in cur.fetchall()]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT url FROM indexer_jobs WHERE status IN ('submitted','inspected')")
+            return [r['url'] for r in cur.fetchall()]
+
+    def get_inspected(self) -> list[str]:
+        if self.backend == "json":
+            return self._data.get("inspected", [])
+        if self.backend == "sqlite":
+            cur = self.conn.execute("SELECT url FROM jobs WHERE status='inspected'")
+            return [r[0] for r in cur.fetchall()]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT url FROM indexer_jobs WHERE status='inspected'")
+            return [r['url'] for r in cur.fetchall()]
+
+    def get_failed(self) -> list[str]:
+        if self.backend == "json":
+            return self._data.get("errors", []) + self._data.get("quota_exceeded", [])
+        if self.backend == "sqlite":
+            cur = self.conn.execute("SELECT url FROM jobs WHERE status IN ('error','quota')")
+            return [r[0] for r in cur.fetchall()]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT url FROM indexer_jobs WHERE status IN ('error','quota')")
+            return [r['url'] for r in cur.fetchall()]
+
+    def get_stats(self) -> dict:
+        if self.backend == "json":
+            return {
+                "submitted": len(self._data.get("submitted", [])),
+                "inspected": len(self._data.get("inspected", [])),
+                "errors": len(self._data.get("errors", [])),
+                "quota_exceeded": len(self._data.get("quota_exceeded", [])),
+            }
+        if self.backend == "sqlite":
+            cur = self.conn.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
+            stats = {row[0]: row[1] for row in cur.fetchall()}
+            return {
+                "submitted": stats.get("submitted", 0),
+                "inspected": stats.get("inspected", 0),
+                "errors": stats.get("error", 0) + stats.get("quota", 0),
+            }
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) as c FROM indexer_jobs GROUP BY status")
+            stats = {row['status']: row['c'] for row in cur.fetchall()}
+            return {
+                "submitted": stats.get("submitted", 0),
+                "inspected": stats.get("inspected", 0),
+                "errors": stats.get("error", 0) + stats.get("quota", 0),
+            }
+
+    def increment_daily_quota(self) -> bool:
+        """Return True if under quota."""
+        today = date.today().isoformat()
+        if self.backend == "json":
+            daily = self._data.setdefault("daily", {})
+            count = daily.get(today, 0) + 1
+            daily[today] = count
+            return count <= DAILY_QUOTA
+        if self.backend == "sqlite":
+            self.conn.execute(
+                "INSERT INTO quota (day, count) VALUES (?, 1) "
+                "ON CONFLICT(day) DO UPDATE SET count = count + 1",
+                (today,)
+            )
+            cur = self.conn.execute("SELECT count FROM quota WHERE day=?", (today,))
+            count = cur.fetchone()[0]
+            self.conn.commit()
+            return count <= DAILY_QUOTA
+        # mysql
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO indexer_quota (day, count) VALUES (%s, 1) "
+                "ON DUPLICATE KEY UPDATE count = count + 1",
+                (today,)
+            )
+            cur.execute("SELECT count FROM indexer_quota WHERE day=%s", (today,))
+            count = cur.fetchone()['count']
+            self.conn.commit()
+            return count <= DAILY_QUOTA
+
+    def _save_json(self):
+        self.path.write_text(json.dumps(self._data, indent=2))
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+    # For JSON compat in old paths
+    @property
+    def data(self):
+        if self.backend == "json":
+            return self._data
+        return {}  # not used for others
+
+
+# Legacy helpers for json compat (used if --results and no --history-backend)
 def load_results(path: Path) -> dict:
     if path.exists():
         try:
@@ -280,12 +559,26 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     parser.add_argument("--limit", type=int, default=0, help="Max URLs to process this run")
     parser.add_argument("--skip", action="append", default=[], help="Paths to skip (can repeat, e.g. --skip /admin --skip /api)")
+
+    # History / persistence
+    parser.add_argument("--history-backend", default=DEFAULT_HISTORY_BACKEND,
+                        choices=["json", "sqlite", "mysql"],
+                        help="State storage: json (simple), sqlite (recommended), mysql (robust fallback)")
+    parser.add_argument("--db-path", default=DEFAULT_DB_PATH, help="Path for sqlite history db")
+    parser.add_argument("--mysql-host", default=os.getenv("MYSQL_HOST", "localhost"))
+    parser.add_argument("--mysql-port", type=int, default=int(os.getenv("MYSQL_PORT", 3306)))
+    parser.add_argument("--mysql-user", default=os.getenv("MYSQL_USER", "root"))
+    parser.add_argument("--mysql-password", default=os.getenv("MYSQL_PASSWORD", ""))
+    parser.add_argument("--mysql-database", default=os.getenv("MYSQL_DATABASE", "indexer"))
+
+    # Extra actions
+    parser.add_argument("--status", action="store_true", help="Show current stats and exit")
+    parser.add_argument("--export-failed", help="Export failed/quota URLs to file and exit")
     args = parser.parse_args()
 
     site = args.site.rstrip("/")
     sitemap_url = args.sitemap or f"{site}/sitemap.xml"
     sa_path = Path(args.service_account)
-    results_path = Path(args.results)
 
     if not sa_path.exists():
         print(f"Service account not found: {sa_path}")
@@ -300,20 +593,53 @@ def main():
     indexing_scope = "https://www.googleapis.com/auth/indexing"
     inspection_scope = "https://www.googleapis.com/auth/webmasters.readonly"
 
-    results = load_results(results_path)
+    # New unified state (supports MySQL fallback for history as requested)
+    mysql_cfg = None
+    if args.history_backend == "mysql":
+        mysql_cfg = {
+            "host": args.mysql_host,
+            "port": args.mysql_port,
+            "user": args.mysql_user,
+            "password": args.mysql_password,
+            "database": args.mysql_database,
+        }
+
+    state = IndexerState(
+        backend=args.history_backend,
+        path=args.db_path if args.history_backend != "json" else args.results,
+        mysql_config=mysql_cfg
+    )
+
+    # Special actions
+    if args.status:
+        stats = state.get_stats()
+        print("=== Indexer Status ===")
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
+        if hasattr(state, 'get_failed'):
+            failed = state.get_failed()
+            print(f"  failed_sample: {failed[:3]}...")
+        state.close()
+        return
+
+    if args.export_failed:
+        failed = state.get_failed()
+        Path(args.export_failed).write_text("\n".join(failed))
+        print(f"Exported {len(failed)} failed URLs to {args.export_failed}")
+        state.close()
+        return
 
     # Build list of URLs
     if args.url:
         urls = [urljoin(site + "/", args.url.lstrip("/"))]
     elif args.retry_errors:
-        urls = results.get("errors", []) + results.get("quota_exceeded", [])
+        urls = state.get_failed()
         print(f"Retrying {len(urls)} failed URLs")
     else:
         urls = fetch_sitemap_urls(sitemap_url)
         if args.resume:
-            done = set(results.get("submitted", [])) | set(results.get("inspected", []))
-            urls = [u for u in urls if u not in done]
-            print(f"Resuming — {len(urls)} URLs left")
+            urls = state.get_pending(urls, resume=True)
+            print(f"Resuming — {len(urls)} URLs left (using {args.history_backend} history)")
 
     if args.limit > 0:
         urls = urls[:args.limit]
@@ -324,14 +650,15 @@ def main():
         urls = [u for u in urls if not any(skip in u for skip in args.skip)]
         print(f"After skips: {len(urls)} (removed {original_len - len(urls)})")
 
-    print(f"Total URLs to process: {len(urls)}")
+    print(f"Total URLs to process: {len(urls)} (backend={args.history_backend})")
 
     if args.dry_run:
         for u in urls:
             print(f"  [DRY] {u}")
+        state.close()
         return
 
-    # Get tokens (separate if needed)
+    # Get tokens
     indexing_token = None
     inspection_token = None
 
@@ -349,45 +676,47 @@ def main():
     for url in urls:
         print(f"\n[{processed+1}/{len(urls)}] {url}")
 
-        # Submit for indexing
+        # Submit
         if needs_indexing:
+            if not state.increment_daily_quota():
+                print("  ⚠ Daily quota reached — stopping")
+                break
+
             status = submit_url(url, indexing_token)
             if status == "OK":
-                if url not in results["submitted"]:
-                    results["submitted"].append(url)
+                state.mark_submitted(url)
                 print("  ✓ Submitted for indexing")
             elif status == "QUOTA_EXCEEDED":
-                results["quota_exceeded"].append(url)
+                state.mark_error(url, "quota", is_quota=True)
                 print("  ⚠ Quota exceeded — stopping")
-                save_results(results_path, results)
                 break
             else:
-                if url not in results["errors"]:
-                    results["errors"].append(url)
+                state.mark_error(url, status)
                 print(f"  ✗ {status}")
 
         # Inspect
         if needs_inspection:
             insp = inspect_url(url, inspection_token, site)
             if insp.get("status") == "OK":
-                if url not in results["inspected"]:
-                    results["inspected"].append(url)
+                state.mark_inspected(url)
                 print(f"  ✓ Inspected | Coverage: {insp.get('coverage')} | Last crawl: {insp.get('lastCrawl')}")
             else:
                 print(f"  ✗ Inspection: {insp.get('status')}")
 
-        save_results(results_path, results)
         processed += 1
         time.sleep(DELAY_SECONDS)
 
-    save_results(results_path, results)
-
     print("\n" + "─" * 50)
-    print(f"Submitted: {len(results['submitted'])}")
-    print(f"Inspected:  {len(results['inspected'])}")
-    print(f"Errors:    {len(results['errors'])}")
-    print(f"Quota hit: {len(results['quota_exceeded'])}")
-    print(f"Results saved to: {results_path}")
+    try:
+        final_stats = state.get_stats()
+        print(f"Submitted: {final_stats.get('submitted', 0)}")
+        print(f"Inspected:  {final_stats.get('inspected', 0)}")
+        print(f"Errors:    {final_stats.get('errors', 0)}")
+    except Exception:
+        pass
+    print(f"History backend: {args.history_backend}")
+    print("Done.")
+    state.close()
 
 
 if __name__ == "__main__":
